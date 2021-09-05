@@ -20,10 +20,12 @@ from itertools import zip_longest
 
 import argparse
 import subprocess
+import multiprocessing as mp
 
 Base = declarative_base()
 
 DB_PATH = 'imgdb.db'
+DEFAULT_HASH = ""
 
 class FileData(Base):
 	__tablename__ = 'files'
@@ -93,6 +95,7 @@ class OcrData(Base):
 		)
 
 class Config:
+	KEY_DB_PATH = 'dbpath'
 	KEY_PATHS = 'paths'
 	KEY_TESSCMD = 'tesscmd'
 	KEY_EXCLUDE_PATHS = 'excludePaths'
@@ -102,6 +105,7 @@ class Config:
 		with open(path, mode="w", encoding="utf8") as outFile:
 			data = {}
 			data[Config.KEY_PATHS] = self.paths
+			data[Config.KEY_DB_PATH] = self.dbpath
 			data[Config.KEY_TESSCMD] = self.tesscmd
 			data[Config.KEY_EXCLUDE_PATHS] = self.excludePaths
 			data[Config.KEY_EXTENSIONS] = self.extensions
@@ -112,6 +116,7 @@ class Config:
 		with open(path, mode="r", encoding='utf8') as inFile:
 			data = json.load(inFile)
 			self.paths = list(data[Config.KEY_PATHS])
+			self.dbpath = data[Config.KEY_DB_PATH]
 			self.tesscmd = data[Config.KEY_TESSCMD]
 			self.excludePaths = list(data[Config.KEY_EXCLUDE_PATHS])
 			self.extensions = list(data[Config.KEY_EXTENSIONS])
@@ -145,6 +150,7 @@ class Config:
 
 	def __init__(self) -> None:
 		self.paths = ['img']
+		self.dbpath = 'imgdb.db'
 		self.tesscmd = ['tesseract']
 		self.excludePaths = ['img/excluded']
 		self.extensions = ['.png', '.tga', '.jpeg', '.jpg', '.bmp']
@@ -263,6 +269,27 @@ def getPaletteString(path: str):
 		#convImg.show()
 		return res
 
+def makeFileData(scanFile: ScanFileData) -> FileData:
+	newData = FileData(
+		path = scanFile.path,
+		size = scanFile.size,
+		mtime = scanFile.mtime,
+		ctime = scanFile.ctime,
+
+		hash = getDigest(scanFile.path)
+	)
+	return newData
+
+def makeDHashData(fileData: FileData) -> DHashData:
+	dhashSize = 8
+	imgHash = getDHash(fileData.path, dhashSize)
+	newData = DHashData(
+		hash = fileData.hash,
+		size = fileData.size,
+		hashSize = dhashSize,
+		dhash = imgHash
+	)
+
 class DbProcessor:
 	def scanFilesystem(self):
 		self.session.query(ScanFileData).delete()
@@ -322,20 +349,24 @@ class DbProcessor:
 			file.ctime = scanFile.ctime
 			file.mtime = scanFile.mtime
 			file.size = scanFile.size
-			file.hash = getDigest(scanFile.path)
+			file.hash = DEFAULT_HASH #getDigest(scanFile.path)
+
+
+		#with mp.Pool() as pool:
 
 		print("processing new files: {0}".format(newFiles.count()))
 		fileIndex = 0
+		#for newData in pool.imap(makeFileData, newFiles.all()):
 		for scanFile in newFiles.all():
 			fileIndex += 1
-			print("processing new file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
+			print("adding new file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
 			newData = FileData(
 				path = scanFile.path,
 				size = scanFile.size,
 				mtime = scanFile.mtime,
 				ctime = scanFile.ctime,
 
-				hash = getDigest(scanFile.path)
+				hash = DEFAULT_HASH #getDigest(scanFile.path)
 			)
 			self.session.add(newData)
 
@@ -345,10 +376,25 @@ class DbProcessor:
 		print("committed")
 		pass
 
+	def buildHashes(self):
+		print("building file hashes")
+		missingHashes = self.session.query(FileData).filter(FileData.hash == '')
+		print("Hashes missing: {0}".format(missingHashes.count()))
+		fileIndex = 0
+		numFiles = missingHashes.count()
+		for fileData in missingHashes.all():
+			fileIndex += 1
+			print("building hash {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
+			fileData.hash = getDigest(fileData.path)
+
+		print("committing to session")
+		self.session.commit()
+		
+
 	def buildDhashes(self):
 		print("building dhashes")
 		missingDHashes = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
+			(FileData.hash != DEFAULT_HASH) and (FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
 		)
 		print("DHashes missing: {0}".format(missingDHashes.count()))
 		dhashSize = 8
@@ -378,7 +424,7 @@ class DbProcessor:
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
 		missingOcr = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
+			(FileData.hash != DEFAULT_HASH) and (FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
 		)
 		numFiles = missingOcr.count()
 		print("missing translations: {0}".format(numFiles))
@@ -406,7 +452,7 @@ class DbProcessor:
 
 	def buildPalettes(self):
 		missingPal = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
+			(FileData.hash != DEFAULT_HASH) and (FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
 		)
 		numFiles = missingPal.count()
 		fileIndex = 0;
@@ -430,7 +476,7 @@ class DbProcessor:
 
 	def __init__(self) -> None:
 		self.config = Config.getConfig()
-		self.engine = create_engine("sqlite:///{0}".format(DB_PATH))
+		self.engine = create_engine("sqlite:///{0}".format(self.config.dbpath))
 		Base.metadata.create_all(self.engine)
 
 		Session = sessionmaker(bind = self.engine)
@@ -451,11 +497,15 @@ class DbProcessor:
 		#subprocess.call(['start', path])
 		#os.open(path)
 
+	def commitSession(self):
+		self.session.commit()
+
 def buildParser():
 	parse = argparse.ArgumentParser()
 	parse.add_argument("--scan", help="scan filesystem", action="store_true")
 	parse.add_argument("--pal", help="build palettes", action="store_true")
-	parse.add_argument("--hash", help="build image hashes", action="store_true")
+	parse.add_argument("--hash", help="build file hashes", action="store_true")
+	parse.add_argument("--imghash", help="build image hashes", action="store_true")
 	parse.add_argument("--ocr", help="ocr images", action="store_true")
 	parse.add_argument("--random", help="open random image", action="store_true")
 	return parse
@@ -467,14 +517,20 @@ def main():
 	print(args)
 	print(args.scan)
 	dbProc = DbProcessor()
-	if (args.scan):
-		dbProc.scanFilesystem()
-	if (args.hash):
-		dbProc.buildDhashes()
-	if (args.ocr):
-		dbProc.buildOcr()
-	if (args.pal):
-		dbProc.buildPalettes()
+	try:
+		if (args.scan):
+			dbProc.scanFilesystem()
+		if (args.hash):
+			dbProc.buildHashes()
+		if (args.imghash):
+			dbProc.buildDhashes()
+		if (args.ocr):
+			dbProc.buildOcr()
+		if (args.pal):
+			dbProc.buildPalettes()
+	except KeyboardInterrupt:
+		print("keyboard interrupt on lengthy operation. Saving to db.")
+		dbProc.commitSession()		
 	if (args.random):
 		dbProc.openRandom()
 
