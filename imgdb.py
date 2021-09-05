@@ -14,10 +14,12 @@ import pytesseract
 import numpy as np
 
 from sqlalchemy.sql import exists
+from sqlalchemy.sql.expression import func
 
 from itertools import zip_longest
 
 import argparse
+import subprocess
 
 Base = declarative_base()
 
@@ -263,6 +265,7 @@ def getPaletteString(path: str):
 
 class DbProcessor:
 	def scanFilesystem(self):
+		self.session.query(ScanFileData).delete()
 		print("scanning filesystem")
 		for curPath in self.config.paths:
 			for root, dirs, files in os.walk(curPath, topdown=True):
@@ -432,16 +435,48 @@ class DbProcessor:
 
 		Session = sessionmaker(bind = self.engine)
 		self.session: sqlalchemy.orm.Session = Session()
-		self.session.query(ScanFileData).delete()
 
 		pass
 
+	def openRandom(self) -> None:
+		rec = self.session.query(FileData).order_by(func.random()).first()
+		if not rec:
+			return
+		path = rec.path
+		fullPath = Path(path)
+		path = fullPath.absolute()
+		print(path)
+		print("opening {0}".format(path))
+		os.startfile(path)
+		#subprocess.call(['start', path])
+		#os.open(path)
+
+def buildParser():
+	parse = argparse.ArgumentParser()
+	parse.add_argument("--scan", help="scan filesystem", action="store_true")
+	parse.add_argument("--pal", help="build palettes", action="store_true")
+	parse.add_argument("--hash", help="build image hashes", action="store_true")
+	parse.add_argument("--ocr", help="ocr images", action="store_true")
+	parse.add_argument("--random", help="open random image", action="store_true")
+	return parse
+
 def main():
+	parser = buildParser()
+	parser.print_help()
+	args = parser.parse_args()
+	print(args)
+	print(args.scan)
 	dbProc = DbProcessor()
-	dbProc.scanFilesystem()
-	dbProc.buildDhashes()
-	dbProc.buildOcr()
-	dbProc.buildPalettes()
+	if (args.scan):
+		dbProc.scanFilesystem()
+	if (args.hash):
+		dbProc.buildDhashes()
+	if (args.ocr):
+		dbProc.buildOcr()
+	if (args.pal):
+		dbProc.buildPalettes()
+	if (args.random):
+		dbProc.openRandom()
 
 if __name__ == "__main__":
 	main()
