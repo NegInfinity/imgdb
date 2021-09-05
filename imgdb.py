@@ -17,6 +17,8 @@ from sqlalchemy.sql import exists
 
 from itertools import zip_longest
 
+import argparse
+
 Base = declarative_base()
 
 DB_PATH = 'imgdb.db'
@@ -259,173 +261,187 @@ def getPaletteString(path: str):
 		#convImg.show()
 		return res
 
-def main():
-	config = Config.getConfig()
-	engine = create_engine("sqlite:///{0}".format(DB_PATH))
-	Base.metadata.create_all(engine)
-
-	Session = sessionmaker(bind = engine)
-	session: sqlalchemy.orm.Session = Session()
-	session.query(ScanFileData).delete()
-
-	print("scanning filesystem")
-	for curPath in config.paths:
-		for root, dirs, files in os.walk(curPath, topdown=True):
-			if config.isExcludedPath(root):
-				continue
-			for curFile in files:
-				curFilePath = os.path.join(root, curFile)
-				if not config.isSupportedExt(curFilePath):
+class DbProcessor:
+	def scanFilesystem(self):
+		print("scanning filesystem")
+		for curPath in self.config.paths:
+			for root, dirs, files in os.walk(curPath, topdown=True):
+				if self.config.isExcludedPath(root):
 					continue
-				print("scanning: {0}".format(curFilePath))
-				fileObj = Path(curFilePath)
-				if not fileObj.exists:
-					print("File {0} not found".format(curFilePath))
-					continue
-				fileStat = fileObj.stat()
+				for curFile in files:
+					curFilePath = os.path.join(root, curFile)
+					if not self.config.isSupportedExt(curFilePath):
+						continue
+					print("scanning: {0}".format(curFilePath))
+					fileObj = Path(curFilePath)
+					if not fileObj.exists:
+						print("File {0} not found".format(curFilePath))
+						continue
+					fileStat = fileObj.stat()
 
-				scanData = ScanFileData(
-					path = curFilePath,
-					size = fileStat.st_size,
-					ctime = datetime.fromtimestamp(fileStat.st_ctime),
-					mtime = datetime.fromtimestamp(fileStat.st_mtime)
-				)
-				session.add(scanData)
+					scanData = ScanFileData(
+						path = curFilePath,
+						size = fileStat.st_size,
+						ctime = datetime.fromtimestamp(fileStat.st_ctime),
+						mtime = datetime.fromtimestamp(fileStat.st_mtime)
+					)
+					self.session.add(scanData)
 
-	print("scan done, building queries")
+		print("scan done, building queries")
 
-	newFiles = session.query(ScanFileData).filter(~ exists().where(FileData.path == ScanFileData.path))
-	deletedFiles = session.query(FileData).filter(~ exists().where(FileData.path == ScanFileData.path))
-	changedFiles = session.query(ScanFileData, FileData).filter(ScanFileData.path == FileData.path).filter(
-		(ScanFileData.size != FileData.size) or 
-		(ScanFileData.mtime != FileData.mtime) or 
-		(ScanFileData.ctime != FileData.ctime)
-	)
-
-	numNewFiles = newFiles.count()
-	print("new files: {0}".format(numNewFiles))
-	numDeletedFiles = deletedFiles.count()
-	print("deleted files: {0}".format(numDeletedFiles))
-	numChangedFiles = changedFiles.count()
-	print("changed files: {0}".format(numChangedFiles))
-
-	print("processing deleted files: {0}".format(deletedFiles.count()))
-	fileIndex = 0
-	for f in deletedFiles.all():
-		fileIndex += 1
-		print("deleting file {0}/{1}".format(fileIndex, numDeletedFiles))
-		session.delete(f)
-
-	print("processing changed files: {0}".format(changedFiles.count()))
-	fileIndex = 0
-	for scanFile, file in changedFiles.all():
-		fileIndex += 1
-		print("processing changed file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
-		file.ctime = scanFile.ctime
-		file.mtime = scanFile.mtime
-		file.size = scanFile.size
-		file.hash = getDigest(scanFile.path)
-
-	print("processing new files: {0}".format(newFiles.count()))
-	fileIndex = 0
-	for scanFile in newFiles.all():
-		fileIndex += 1
-		print("processing new file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
-		newData = FileData(
-			path = scanFile.path,
-			size = scanFile.size,
-			mtime = scanFile.mtime,
-			ctime = scanFile.ctime,
-
-			hash = getDigest(scanFile.path)
+		newFiles = self.session.query(ScanFileData).filter(~ exists().where(FileData.path == ScanFileData.path))
+		deletedFiles = self.session.query(FileData).filter(~ exists().where(FileData.path == ScanFileData.path))
+		changedFiles = self.session.query(ScanFileData, FileData).filter(ScanFileData.path == FileData.path).filter(
+			(ScanFileData.size != FileData.size) or 
+			(ScanFileData.mtime != FileData.mtime) or 
+			(ScanFileData.ctime != FileData.ctime)
 		)
-		session.add(newData)
 
-	print("committing to db")	
+		numNewFiles = newFiles.count()
+		print("new files: {0}".format(numNewFiles))
+		numDeletedFiles = deletedFiles.count()
+		print("deleted files: {0}".format(numDeletedFiles))
+		numChangedFiles = changedFiles.count()
+		print("changed files: {0}".format(numChangedFiles))
 
-	session.commit()
-	print("committed")
+		print("processing deleted files: {0}".format(deletedFiles.count()))
+		fileIndex = 0
+		for f in deletedFiles.all():
+			fileIndex += 1
+			print("deleting file {0}/{1}".format(fileIndex, numDeletedFiles))
+			self.session.delete(f)
 
-	print("building dhashes")
-	missingDHashes = session.query(FileData).filter(~ exists().where(
-		(FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
-	)
-	print("DHashes missing: {0}".format(missingDHashes.count()))
-	dhashSize = 8
-	fileIndex = 0
-	numFiles = missingDHashes.count()
-	for fileData in missingDHashes.all():
-		fileIndex += 1
-		print("building hash {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
+		print("processing changed files: {0}".format(changedFiles.count()))
+		fileIndex = 0
+		for scanFile, file in changedFiles.all():
+			fileIndex += 1
+			print("processing changed file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
+			file.ctime = scanFile.ctime
+			file.mtime = scanFile.mtime
+			file.size = scanFile.size
+			file.hash = getDigest(scanFile.path)
 
-		imgHash = getDHash(fileData.path, dhashSize)
-		newData = DHashData(
-			hash = fileData.hash,
-			size = fileData.size,
-			hashSize = dhashSize,
-			dhash = imgHash
+		print("processing new files: {0}".format(newFiles.count()))
+		fileIndex = 0
+		for scanFile in newFiles.all():
+			fileIndex += 1
+			print("processing new file {1}/{2}: {0}".format(scanFile.path, fileIndex, numNewFiles))
+			newData = FileData(
+				path = scanFile.path,
+				size = scanFile.size,
+				mtime = scanFile.mtime,
+				ctime = scanFile.ctime,
+
+				hash = getDigest(scanFile.path)
+			)
+			self.session.add(newData)
+
+		print("committing to db")	
+
+		self.session.commit()
+		print("committed")
+		pass
+
+	def buildDhashes(self):
+		print("building dhashes")
+		missingDHashes = self.session.query(FileData).filter(~ exists().where(
+			(FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
 		)
-		print(newData)
-		session.add(newData)
+		print("DHashes missing: {0}".format(missingDHashes.count()))
+		dhashSize = 8
+		fileIndex = 0
+		numFiles = missingDHashes.count()
+		for fileData in missingDHashes.all():
+			fileIndex += 1
+			print("building hash {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
 
-	print("commiting")
-	session.commit()
-
-	print("ocr")
-	pytesseract.pytesseract.tesseract_cmd = config.tesscmd
-
-	print(pytesseract.get_languages())
-	ocrLang = 'eng'
-	missingOcr = session.query(FileData).filter(~ exists().where(
-		(FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
-	)
-	numFiles = missingOcr.count()
-	print("missing translations: {0}".format(numFiles))
-	fileIndex = 0
-	useFullData = False
-	for fileData in missingOcr.all():
-		fileIndex += 1
-		print("building ocr {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
-
-		with Image.open(fileData.path) as img:
-			ocr = pytesseract.image_to_data(img, lang=ocrLang) if useFullData else pytesseract.image_to_string(img, lang=ocrLang) 
-			#print(ocr)
-			newData = OcrData(
-				size = fileData.size,
+			imgHash = getDHash(fileData.path, dhashSize)
+			newData = DHashData(
 				hash = fileData.hash,
-				lang = ocrLang,
-				text = ocr
+				size = fileData.size,
+				hashSize = dhashSize,
+				dhash = imgHash
 			)
 			print(newData)
-			session.add(newData)
-			
-	print("commiting")
-	session.commit()
-	print('all done')
+			self.session.add(newData)
 
-	missingPal = session.query(FileData).filter(~ exists().where(
-		(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
-	)
-	numFiles = missingPal.count()
-	fileIndex = 0;
-	print("missing palettes: {0}".format(numFiles))
-	for fileData in missingPal.all():
-		fileIndex += 1
-		print("building palette {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
+		print("commiting")
+		self.session.commit()
 
-		palString = getPaletteString(fileData.path)
-		#print(palString)
-		newData = PaletteData(
-			size = fileData.size,
-			hash = fileData.hash,
-			palette = palString
+		pass
+
+	def buildOcr(self, ocrLang='eng'):
+		pytesseract.pytesseract.tesseract_cmd = self.config.tesscmd
+
+		print("tess languages: {0}".format(pytesseract.get_languages()))
+		missingOcr = self.session.query(FileData).filter(~ exists().where(
+			(FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
 		)
-		print(newData)
-		session.add(newData)
+		numFiles = missingOcr.count()
+		print("missing translations: {0}".format(numFiles))
+		fileIndex = 0
+		useFullData = False
+		for fileData in missingOcr.all():
+			fileIndex += 1
+			print("building ocr {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
 
-	session.commit()
+			with Image.open(fileData.path) as img:
+				ocr = pytesseract.image_to_data(img, lang=ocrLang) if useFullData else pytesseract.image_to_string(img, lang=ocrLang) 
+				#print(ocr)
+				newData = OcrData(
+					size = fileData.size,
+					hash = fileData.hash,
+					lang = ocrLang,
+					text = ocr
+				)
+				print(newData)
+				self.session.add(newData)
+				
+		print("commiting")
+		self.session.commit()
+		pass
 
-	pass
+	def buildPalettes(self):
+		missingPal = self.session.query(FileData).filter(~ exists().where(
+			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
+		)
+		numFiles = missingPal.count()
+		fileIndex = 0;
+		print("missing palettes: {0}".format(numFiles))
+		for fileData in missingPal.all():
+			fileIndex += 1
+			print("building palette {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
+
+			palString = getPaletteString(fileData.path)
+			#print(palString)
+			newData = PaletteData(
+				size = fileData.size,
+				hash = fileData.hash,
+				palette = palString
+			)
+			print(newData)
+			self.session.add(newData)
+
+		self.session.commit()
+		pass
+
+	def __init__(self) -> None:
+		self.config = Config.getConfig()
+		self.engine = create_engine("sqlite:///{0}".format(DB_PATH))
+		Base.metadata.create_all(self.engine)
+
+		Session = sessionmaker(bind = self.engine)
+		self.session: sqlalchemy.orm.Session = Session()
+		self.session.query(ScanFileData).delete()
+
+		pass
+
+def main():
+	dbProc = DbProcessor()
+	dbProc.scanFilesystem()
+	dbProc.buildDhashes()
+	dbProc.buildOcr()
+	dbProc.buildPalettes()
 
 if __name__ == "__main__":
 	main()
