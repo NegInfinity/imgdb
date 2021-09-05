@@ -159,7 +159,7 @@ class Config:
 
 def getDigest(path: str):
 	h = hashlib.sha256()
-	blockSize = 1024 * 128
+	blockSize = 1024 * 1024 * 10
 	with open(path, "rb") as inFile:
 		while True:
 			chunk = inFile.read(blockSize)
@@ -393,8 +393,8 @@ class DbProcessor:
 
 	def buildDhashes(self):
 		print("building dhashes")
-		missingDHashes = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash != DEFAULT_HASH) and (FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
+		missingDHashes = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
+			(FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
 		)
 		print("DHashes missing: {0}".format(missingDHashes.count()))
 		dhashSize = 8
@@ -423,8 +423,8 @@ class DbProcessor:
 		pytesseract.pytesseract.tesseract_cmd = self.config.tesscmd
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
-		missingOcr = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash != DEFAULT_HASH) and (FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
+		missingOcr = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
+			(FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
 		)
 		numFiles = missingOcr.count()
 		print("missing translations: {0}".format(numFiles))
@@ -451,8 +451,8 @@ class DbProcessor:
 		pass
 
 	def buildPalettes(self):
-		missingPal = self.session.query(FileData).filter(~ exists().where(
-			(FileData.hash != DEFAULT_HASH) and (FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
+		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
+			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
 		)
 		numFiles = missingPal.count()
 		fileIndex = 0;
