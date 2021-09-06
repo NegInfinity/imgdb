@@ -256,7 +256,6 @@ def getPaletteString(path: str):
 		for x in letterPalette:
 			palette.extend(x[1])
 		palette = palette + [0]*(768 - len(palette))
-		#print("mode: {0}: {1}".format(img.mode, path))
 		
 		palImg = Image.new('P', (1, 1))
 		palImg.putpalette(palette)
@@ -270,22 +269,30 @@ def getPaletteString(path: str):
 			convImg = img.quantize(colors=len(letterPalette), palette=palImg, dither=0)
 		unique, counts = np.unique(convImg, return_counts=True)
 		total = sum(counts)
-		#print(unique, counts, total)
 		cutoff = total*2/100
 
-		zipped = list(zip_longest(unique, counts))
+		zipped = zip_longest(unique, counts)
+		zipped = list(zipped)
 		if (len(zipped) > len(letterPalette)):
 			print("invalid palette: {0} (len zipped: {1}). MOde: {2}".format(path, len(zipped), img.mode))
 			#print(zipped, len(zipped))
 			raise Exception("Algorithm error")
+			
 		#print(list(zipped))
-		res = [letterPalette[x[0]][0] for x in zipped if x[1] > cutoff]
-		#origRes = "".join(res)
-		res = "".join(c[0] for c in groupby(res))
-		#res = "".join(res)
-		#print(res, origRes)
-		#convImg.show()
-		return res
+		res = [(letterPalette[x[0]][0], x[1]) for x in zipped if x[1] > cutoff]
+
+		letterCounts = {}
+		for x in res:
+			letterCounts[x[0]] = letterCounts.get(x[0], 0) + x[1]
+
+		letters = list(letterCounts)
+		letters.sort(key = lambda x: letterCounts.get(x, 0), reverse=True)
+
+		result = "".join(letters)
+		return result
+		# print(letterCounts)
+		# res = "".join(c[0] for c in groupby(res))
+		# return res
 
 def makeFileData(scanFile: ScanFileData) -> FileData:
 	newData = FileData(
@@ -321,6 +328,8 @@ def makePaletteData(fileData: FileData) -> PaletteData:
 		return (newData, fileData)
 	except KeyboardInterrupt:
 		return None
+	except Exception as e:
+		return e
 
 class DbProcessor:
 	def scanFilesystem(self):
@@ -483,17 +492,32 @@ class DbProcessor:
 		self.session.commit()
 		pass
 
+	def killPalettes(self):
+		print("deleting palettes")
+		self.session.query(PaletteData).delete()
+		print("comitting")
+		self.session.commit()
+		print("done")
+		pass
+
 	def buildPalettes(self):
 		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
 			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
 		)
 
+		numFiles = missingPal.count()
+		print("missing palettes: {0}".format(numFiles))
 		with mp.Pool() as pool:
-			numFiles = missingPal.count()
 			fileIndex = 0;
 			for curData in pool.imap(makePaletteData, missingPal.all(), chunksize = 8):
 				if not curData:
 					raise OperationInterruptedException()
+				if isinstance(curData, Exception):
+					print("exception has occured: {0}".format(curData))
+					continue
+				if isinstance(curData, OSError):
+					print("os error: {0}".format(curData))
+					continue
 				newData = curData[0]
 				fileData = curData[1]
 				fileIndex += 1
@@ -551,6 +575,7 @@ def buildParser():
 	parse = argparse.ArgumentParser()
 	parse.add_argument("--scan", help="scan filesystem", action="store_true")
 	parse.add_argument("--pal", help="build palettes", action="store_true")
+	parse.add_argument("--killpal", help="kill palettes", action="store_true")
 	parse.add_argument("--hash", help="build file hashes", action="store_true")
 	parse.add_argument("--imghash", help="build image hashes", action="store_true")
 	parse.add_argument("--ocr", help="ocr images", action="store_true")
@@ -567,6 +592,8 @@ def main():
 	try:
 		if (args.scan):
 			dbProc.scanFilesystem()
+		if (args.killpal):
+			dbProc.killPalettes()
 		if (args.hash):
 			dbProc.buildHashes()
 		if (args.imghash):
