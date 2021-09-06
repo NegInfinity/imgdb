@@ -16,7 +16,7 @@ import numpy as np
 from sqlalchemy.sql import exists
 from sqlalchemy.sql.expression import func
 
-from itertools import zip_longest
+from itertools import zip_longest, groupby
 
 import argparse
 import subprocess
@@ -93,6 +93,9 @@ class OcrData(Base):
 		return "OcrData: {{id: {0}, hash: '{1}', size: {2}, lang: {3}, text: {4}}}".format(
 			self.id, self.hash, self.size, self.lang, self.text
 		)
+
+class OperationInterruptedException(Exception):
+	pass
 
 class Config:
 	KEY_DB_PATH = 'dbpath'
@@ -253,19 +256,34 @@ def getPaletteString(path: str):
 		for x in letterPalette:
 			palette.extend(x[1])
 		palette = palette + [0]*(768 - len(palette))
+		#print("mode: {0}: {1}".format(img.mode, path))
 		
 		palImg = Image.new('P', (1, 1))
 		palImg.putpalette(palette)
 
-		convImg = img.quantize(palette=palImg, dither=0)
+		convImg = None
+
+		if (img.mode == 'L') or (img.mode == 'P'):
+			tmpImg = img.convert('RGB')
+			convImg = tmpImg.quantize(colors=len(letterPalette), palette=palImg, dither=0)
+		else:
+			convImg = img.quantize(colors=len(letterPalette), palette=palImg, dither=0)
 		unique, counts = np.unique(convImg, return_counts=True)
 		total = sum(counts)
 		#print(unique, counts, total)
 		cutoff = total*2/100
 
-		res = [letterPalette[x[0]][0] for x in zip_longest(unique, counts) if x[1] > cutoff]
-		res = "".join(res)
-		#print(res)
+		zipped = list(zip_longest(unique, counts))
+		if (len(zipped) > len(letterPalette)):
+			print("invalid palette: {0} (len zipped: {1}). MOde: {2}".format(path, len(zipped), img.mode))
+			#print(zipped, len(zipped))
+			raise Exception("Algorithm error")
+		#print(list(zipped))
+		res = [letterPalette[x[0]][0] for x in zipped if x[1] > cutoff]
+		#origRes = "".join(res)
+		res = "".join(c[0] for c in groupby(res))
+		#res = "".join(res)
+		#print(res, origRes)
 		#convImg.show()
 		return res
 
@@ -289,6 +307,20 @@ def makeDHashData(fileData: FileData) -> DHashData:
 		hashSize = dhashSize,
 		dhash = imgHash
 	)
+
+def makePaletteData(fileData: FileData) -> PaletteData:
+	try:
+		palString = getPaletteString(fileData.path)
+		#print(palString)
+		newData = PaletteData(
+			size = fileData.size,
+			hash = fileData.hash,
+			palette = palString
+		)
+		#print(newData)
+		return (newData, fileData)
+	except KeyboardInterrupt:
+		return None
 
 class DbProcessor:
 	def scanFilesystem(self):
@@ -370,6 +402,7 @@ class DbProcessor:
 			)
 			self.session.add(newData)
 
+		self.session.query(ScanFileData).delete()
 		print("committing to db")	
 
 		self.session.commit()
@@ -454,22 +487,36 @@ class DbProcessor:
 		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
 			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
 		)
-		numFiles = missingPal.count()
-		fileIndex = 0;
-		print("missing palettes: {0}".format(numFiles))
-		for fileData in missingPal.all():
-			fileIndex += 1
-			print("building palette {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
 
-			palString = getPaletteString(fileData.path)
-			#print(palString)
-			newData = PaletteData(
-				size = fileData.size,
-				hash = fileData.hash,
-				palette = palString
-			)
-			print(newData)
-			self.session.add(newData)
+		with mp.Pool() as pool:
+			numFiles = missingPal.count()
+			fileIndex = 0;
+			for curData in pool.imap(makePaletteData, missingPal.all(), chunksize = 8):
+				if not curData:
+					raise OperationInterruptedException()
+				newData = curData[0]
+				fileData = curData[1]
+				fileIndex += 1
+				print("building palette {1}/{2} ({3}) for: {0}".format(fileData.path, fileIndex, numFiles, newData.palette))
+				#print(newData)
+				self.session.add(newData)
+
+		# numFiles = missingPal.count()
+		# fileIndex = 0;
+		# print("missing palettes: {0}".format(numFiles))
+		# for fileData in missingPal.all():
+		# 	fileIndex += 1
+		# 	print("building palette {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
+
+		# 	palString = getPaletteString(fileData.path)
+		# 	#print(palString)
+		# 	newData = PaletteData(
+		# 		size = fileData.size,
+		# 		hash = fileData.hash,
+		# 		palette = palString
+		# 	)
+		# 	print(newData)
+		# 	self.session.add(newData)
 
 		self.session.commit()
 		pass
@@ -531,6 +578,10 @@ def main():
 	except KeyboardInterrupt:
 		print("keyboard interrupt on lengthy operation. Saving to db.")
 		dbProc.commitSession()		
+	except OperationInterruptedException:
+		print("operation interrupted on lengthy operation. Saving to db.")
+		dbProc.commitSession()
+
 	if (args.random):
 		dbProc.openRandom()
 
