@@ -788,32 +788,33 @@ class DbProcessor:
 		#subprocess.call(['start', path])
 		#os.open(path)
 
-	def findColor(self, col: str, mainColor: bool ):
-		colorQuery = "{0}%".format(col) if mainColor else "%{0}%".format(col)
-
+	def colorLike(self, colorQuery: str, brief: bool):
 		colors = self.session.query(
 			PaletteData.palette, FileData.path
 		).join(
 			PaletteData, (FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size)
 		).filter(PaletteData.palette.ilike(colorQuery)).order_by(PaletteData.palette, FileData.path).distinct()
 		
-		numResults = colors.count()
-		if not numResults:
-			print("nothing found")
-			return
-
-		print("found results: {0}".format(numResults))
+		if not brief:
+			numResults = colors.count()
+			if not numResults:
+				print("nothing found")
+				return
+			print("found results: {0}".format(numResults))
 		prevVal = ""
 		for x in colors.all():
 			group = x[0]
 			path = x[1]
 			if (group != prevVal):
-				print("\n{0}:".format(group))
+				if not brief:
+					print("\n{0}:".format(group))
 				prevVal = group
 			print("{0}".format(path))
 		#print(colors.all())
-		pass
-		pass
+
+	def findColor(self, col: str, mainColor: bool, brief: bool):
+		colorQuery = "{0}%".format(col) if mainColor else "%{0}%".format(col)
+		self.colorLike(colorQuery, brief)
 
 	def listColors(self):
 		print("listing colors")
@@ -848,15 +849,17 @@ def buildParser():
 	parse.add_argument("--random", help="open random image", action="store_true")
 	parse.add_argument("--findmaincolor", help="list images with specified main colors. (ROYGBCMKLW)", action="store")
 	parse.add_argument("--findcolor", help="list images with specified colors (ROYGBCMKLW)", action="store")
+	parse.add_argument("--colorlike", help="color search using ilike syntax (ROYGBCMKLW)", action="store")
 	parse.add_argument("--listcolors", help="list image colors", action="store_true")
+	parse.add_argument("--brief", help="print less stuff", action="store_true")
 	return parse
 
 def main():
 	parser = buildParser()
-	parser.print_help()
+	#parser.print_help()
 	args = parser.parse_args()
-	print(args)
-	print(args.scan)
+	#print(args)
+	#print(args.scan)
 	dbProc = DbProcessor()
 	try:
 		if (args.scan):
@@ -879,9 +882,11 @@ def main():
 		dbProc.commitSession()
 
 	if (args.findmaincolor):
-		dbProc.findColor(args.findmaincolor, True)
+		dbProc.findColor(args.findmaincolor, True, args.brief)
 	if (args.findcolor):
-		dbProc.findColor(args.findcolor, False)
+		dbProc.findColor(args.findcolor, False, args.brief)
+	if (args.colorlike):
+		dbProc.colorLike(args.colorlike, args.brief)
 	if (args.listcolors):
 		dbProc.listColors()
 
