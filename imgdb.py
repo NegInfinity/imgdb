@@ -1,6 +1,7 @@
-import os, json
+import os, json, sys
 from sqlalchemy import Column, Integer, String, DateTime
 from sqlalchemy import create_engine
+from sqlalchemy import tuple_
 import sqlalchemy
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
@@ -32,11 +33,11 @@ class FileData(Base):
 
 	id = Column(Integer, primary_key=True)
 	path = Column(String, unique=True)
-	size = Column(Integer)
+	size = Column(Integer, index=True)
 	ctime = Column(DateTime)
 	mtime = Column(DateTime)
 
-	hash = Column(String)
+	hash = Column(String, index=True)
 	def __str__(self) -> str:
 		return "FileData: {{id: {0}, path: '{1}', size: {2}, ctime: {3}, mtime: {4}, hash: {5}}}".format(
 			self.id, self.path, self.size, self.ctime, self.mtime, self.hash
@@ -59,8 +60,8 @@ class ScanFileData(Base):
 class DHashData(Base):
 	__tablename__ = 'dhashes'
 	id = Column(Integer, primary_key=True)
-	hash = Column(String)
-	size = Column(Integer)
+	hash = Column(String, index=True)
+	size = Column(Integer, index=True)
 
 	hashSize = Column(Integer)
 	dhash = Column(String)
@@ -72,10 +73,10 @@ class DHashData(Base):
 class PaletteData(Base):
 	__tablename__ = 'palettes'
 	id = Column(Integer, primary_key=True)
-	hash = Column(String)
-	size = Column(Integer)
+	hash = Column(String, index=True)
+	size = Column(Integer, index=True)
 
-	palette = Column(String)
+	palette = Column(String, index=True)
 	def __str__(self) -> str:
 		return "PaletteData: {{id: {0}, hash: '{1}', size: {2}, palette: {3}}}".format(
 			self.id, self.hash, self.size, self.palette
@@ -84,11 +85,11 @@ class PaletteData(Base):
 class OcrData(Base):
 	__tablename__ = 'ocr'
 	id = Column(Integer, primary_key=True)
-	hash = Column(String)
-	size = Column(Integer)
+	hash = Column(String, index=True)
+	size = Column(Integer, index=True)
 
 	lang = Column(String)
-	text = Column(String)
+	text = Column(String, index=True)
 	def __str__(self) -> str:
 		return "OcrData: {{id: {0}, hash: '{1}', size: {2}, lang: {3}, text: {4}}}".format(
 			self.id, self.hash, self.size, self.lang, self.text
@@ -656,7 +657,7 @@ class DbProcessor:
 	def buildDhashes(self):
 		print("building dhashes")
 		missingDHashes = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			(FileData.hash == DHashData.hash) and (FileData.size == DHashData.size))
+			(FileData.hash == DHashData.hash) & (FileData.size == DHashData.size))
 		)
 		print("DHashes missing: {0}".format(missingDHashes.count()))
 		dhashSize = 8
@@ -686,8 +687,9 @@ class DbProcessor:
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
 		missingOcr = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			(FileData.hash == OcrData.hash) and (FileData.size == OcrData.size) and (OcrData.lang == ocrLang)) #This is wrong and doesn't work
+			(FileData.hash == OcrData.hash) & (FileData.size == OcrData.size) & (OcrData.lang == ocrLang))
 		)
+		print(missingOcr)
 		numFiles = missingOcr.count()
 		print("missing translations: {0}".format(numFiles))
 		fileIndex = 0
@@ -721,12 +723,23 @@ class DbProcessor:
 		pass
 
 	def buildPalettes(self):
-		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			(FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size))
+		# missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(
+		# 	~ exists().where(
+		# 		(FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+		# 	)
+		# )
+		missingPal = self.session.query(FileData).filter(
+			FileData.hash != DEFAULT_HASH
+		).filter(
+			~tuple_(FileData.hash, FileData.size).in_(
+				self.session.query(PaletteData.hash, PaletteData.size)
+			)
 		)
+		print(missingPal)
 
 		numFiles = missingPal.count()
 		print("missing palettes: {0}".format(numFiles))
+		#numFiles = 0
 		with mp.Pool() as pool:
 			fileIndex = 0;
 			for curData in pool.imap(makePaletteData, missingPal.all(), chunksize = 8):
@@ -792,7 +805,7 @@ class DbProcessor:
 		colors = self.session.query(
 			PaletteData.palette, FileData.path
 		).join(
-			PaletteData, (FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size)
+			PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
 		).filter(PaletteData.palette.ilike(colorQuery)).order_by(PaletteData.palette, FileData.path).distinct()
 		
 		if not brief:
@@ -821,7 +834,7 @@ class DbProcessor:
 		colors = self.session.query(
 			PaletteData.palette, FileData.path
 		).join(
-			PaletteData, (FileData.hash == PaletteData.hash) and (FileData.size == PaletteData.size)
+			PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
 		).order_by(PaletteData.palette, FileData.path).distinct()
 		
 		prevVal = ""
@@ -834,6 +847,66 @@ class DbProcessor:
 			print("{0}".format(path))
 		#print(colors.all())
 		pass
+
+	def exportJson(self, filepath):
+		with open(filepath, "w", encoding="utf8") as outFile:
+			outData = {}
+			outData['files'] = [
+				(x.path, x.hash, x.size, datetime.timestamp(x.ctime), datetime.timestamp(x.mtime)) for x in self.session.query(FileData).all()
+			]
+			outData['pal'] = [
+				(x.hash, x.size, x.palette) for x in self.session.query(PaletteData).all()
+			]
+			outData['dhash'] = [
+				(x.hash, x.size, x.dhash, x.hashSize) for x in self.session.query(DHashData).all()
+			]
+			outData['ocr'] = [
+				(x.hash, x.size, x.lang, x.text) for x in self.session.query(OcrData).all()
+			]
+			json.dump(outData, outFile, indent='\t')
+
+	def importJson(self, filepath):
+		with open(filepath, "r", encoding="utf8") as inFile:
+			inData = json.load(inFile)
+			print('adding files')
+			for x in inData['files']:
+				newData = FileData(
+					path = x[0],
+					hash = x[1],
+					size = x[2],
+					ctime = datetime.fromtimestamp(x[3]),
+					mtime = datetime.fromtimestamp(x[4])
+				)
+				self.session.add(newData)
+			print('adding palettes')
+			for x in inData['pal']:
+				newData = PaletteData(
+					hash = x[0],
+					size = x[1],
+					palette = x[2]
+				)
+				self.session.add(newData)
+			print('adding dhash')
+			for x in inData['dhash']:
+				newData = DHashData(
+					hash = x[0],
+					size = x[1],
+					dhash = x[2],
+					hashSize = x[3]
+				)
+				self.session.add(newData)
+			print('adding ocr')
+			for x in inData['ocr']:
+				newData = OcrData(
+					hash = x[0],
+					size = x[1],
+					lang = x[2],
+					text = x[3]
+				)
+				self.session.add(newData)
+			print('comitting')
+			self.session.commit()
+			print('done')
 
 	def commitSession(self):
 		self.session.commit()
@@ -852,9 +925,13 @@ def buildParser():
 	parse.add_argument("--colorlike", help="color search using ilike syntax (ROYGBCMKLW)", action="store")
 	parse.add_argument("--listcolors", help="list image colors", action="store_true")
 	parse.add_argument("--brief", help="print less stuff", action="store_true")
+	parse.add_argument("--exportjson", help="export database to file", action="store")
+	parse.add_argument("--importjson", help="import database from file", action="store")
 	return parse
 
 def main():
+	sys.stdout.reconfigure(encoding='utf-8')
+	
 	parser = buildParser()
 	#parser.print_help()
 	args = parser.parse_args()
@@ -889,6 +966,10 @@ def main():
 		dbProc.colorLike(args.colorlike, args.brief)
 	if (args.listcolors):
 		dbProc.listColors()
+	if (args.exportjson):
+		dbProc.exportJson(args.exportjson)
+	if (args.importjson):
+		dbProc.importJson(args.importjson)
 
 	if (args.random):
 		dbProc.openRandom()
