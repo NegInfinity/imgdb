@@ -657,7 +657,8 @@ class DbProcessor:
 	def buildDhashes(self):
 		print("building dhashes")
 		missingDHashes = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			(FileData.hash == DHashData.hash) & (FileData.size == DHashData.size))
+			# (FileData.hash == DHashData.hash) & (FileData.size == DHashData.size))
+			(FileData.hash == DHashData.hash))
 		)
 		print("DHashes missing: {0}".format(missingDHashes.count()))
 		dhashSize = 8
@@ -687,7 +688,8 @@ class DbProcessor:
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
 		missingOcr = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			(FileData.hash == OcrData.hash) & (FileData.size == OcrData.size) & (OcrData.lang == ocrLang))
+			# (FileData.hash == OcrData.hash) & (FileData.size == OcrData.size) & (OcrData.lang == ocrLang))
+			(FileData.hash == OcrData.hash) & (OcrData.lang == ocrLang))
 		)
 		print(missingOcr)
 		numFiles = missingOcr.count()
@@ -723,18 +725,19 @@ class DbProcessor:
 		pass
 
 	def buildPalettes(self):
-		# missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(
-		# 	~ exists().where(
-		# 		(FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
-		# 	)
-		# )
-		missingPal = self.session.query(FileData).filter(
-			FileData.hash != DEFAULT_HASH
-		).filter(
-			~tuple_(FileData.hash, FileData.size).in_(
-				self.session.query(PaletteData.hash, PaletteData.size)
+		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(
+			~ exists().where(
+				# (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+				(FileData.hash == PaletteData.hash)
 			)
 		)
+		# missingPal = self.session.query(FileData).filter(
+		# 	FileData.hash != DEFAULT_HASH
+		# ).filter(
+		# 	~tuple_(FileData.hash, FileData.size).in_(
+		# 		self.session.query(PaletteData.hash, PaletteData.size)
+		# 	)
+		# )
 		print(missingPal)
 
 		numFiles = missingPal.count()
@@ -805,7 +808,8 @@ class DbProcessor:
 		colors = self.session.query(
 			PaletteData.palette, FileData.path
 		).join(
-			PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+			# PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+			PaletteData, (FileData.hash == PaletteData.hash)
 		).filter(PaletteData.palette.ilike(colorQuery)).order_by(PaletteData.palette, FileData.path).distinct()
 		
 		if not brief:
@@ -834,7 +838,8 @@ class DbProcessor:
 		colors = self.session.query(
 			PaletteData.palette, FileData.path
 		).join(
-			PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+			# PaletteData, (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
+			PaletteData, (FileData.hash == PaletteData.hash)
 		).order_by(PaletteData.palette, FileData.path).distinct()
 		
 		prevVal = ""
