@@ -22,6 +22,7 @@ from itertools import zip_longest, groupby
 import argparse
 import subprocess
 import multiprocessing as mp
+from typing import Optional
 
 Base = declarative_base()
 
@@ -470,7 +471,7 @@ letterPalette = [
 	('W', (0xff, 0xff, 0xff))
 ]
 
-def getPaletteString(path: str):
+def getPaletteString(path: str) -> str:
 	with Image.open(path) as img:
 		palette = []
 		for x in letterPalette:
@@ -482,7 +483,8 @@ def getPaletteString(path: str):
 
 		convImg = None
 
-		if (img.mode == 'L') or (img.mode == 'P'):
+		#print("{0}: {1}".format(img.mode, path))
+		if (img.mode in ['L', 'LA', 'CMYK', '1', 'P', 'RGBA']):
 			tmpImg = img.convert('RGB')
 			convImg = tmpImg.quantize(colors=len(letterPalette), palette=palImg, dither=0)
 		else:
@@ -526,17 +528,51 @@ def makeFileData(scanFile: ScanFileData) -> FileData:
 	)
 	return newData
 
-def makeDHashData(fileData: FileData) -> DHashData:
-	dhashSize = 8
-	imgHash = getDHash(fileData.path, dhashSize)
-	newData = DHashData(
-		hash = fileData.hash,
-		size = fileData.size,
-		hashSize = dhashSize,
-		dhash = imgHash
-	)
+def makeHashData(fileData: FileData) -> tuple[str, FileData]:
+	try:
+		return (fileData, getDigest(fileData.path))
+	except KeyboardInterrupt:
+		return None
 
-def makePaletteData(fileData: FileData) -> PaletteData:
+def makeDHashData(data: tuple[FileData, int]) -> tuple[DHashData, str]:
+	try:
+		fileData = data[0]
+		dhashSize = data[1]
+		imgHash = getDHash(fileData.path, dhashSize)
+		newData = DHashData(
+			hash = fileData.hash,
+			size = fileData.size,
+			hashSize = dhashSize,
+			dhash = imgHash
+		)
+		return (newData, fileData.path)
+	except KeyboardInterrupt:
+		return None
+
+def makeOcrData(data: tuple[FileData, str, str, bool]) -> tuple[OcrData, str]:
+	try:
+		fileData = data[0]
+		tessCmd = data[1]
+		ocrLang = data[2]
+		useFullData = data[3]
+
+		with Image.open(fileData.path) as img:
+			pytesseract.pytesseract.tesseract_cmd = tessCmd
+			ocr = pytesseract.image_to_data(img, lang=ocrLang) if useFullData else pytesseract.image_to_string(img, lang=ocrLang) 
+			newData = OcrData(
+				size = fileData.size,
+				hash = fileData.hash,
+				lang = ocrLang,
+				text = ocr
+			)
+			return (newData, fileData.path)
+	except KeyboardInterrupt:
+		return None
+	except Exception as e:
+		return (e, fileData.path)
+
+def makePaletteData(fileData: FileData) \
+		-> tuple[Optional[PaletteData], str, Optional[Exception]]:
 	try:
 		palString = getPaletteString(fileData.path)
 		#print(palString)
@@ -546,11 +582,11 @@ def makePaletteData(fileData: FileData) -> PaletteData:
 			palette = palString
 		)
 		#print(newData)
-		return (newData, fileData)
+		return (newData, fileData.path, None)
 	except KeyboardInterrupt:
 		return None
 	except Exception as e:
-		return e
+		return (None, fileData.path, e)
 
 class DbProcessor:
 	def scanFilesystem(self):
@@ -611,10 +647,7 @@ class DbProcessor:
 			file.ctime = scanFile.ctime
 			file.mtime = scanFile.mtime
 			file.size = scanFile.size
-			file.hash = DEFAULT_HASH #getDigest(scanFile.path)
-
-
-		#with mp.Pool() as pool:
+			file.hash = DEFAULT_HASH
 
 		print("processing new files: {0}".format(newFiles.count()))
 		fileIndex = 0
@@ -628,7 +661,7 @@ class DbProcessor:
 				mtime = scanFile.mtime,
 				ctime = scanFile.ctime,
 
-				hash = DEFAULT_HASH #getDigest(scanFile.path)
+				hash = DEFAULT_HASH
 			)
 			self.session.add(newData)
 
@@ -643,6 +676,7 @@ class DbProcessor:
 		print("building file hashes")
 		missingHashes = self.session.query(FileData).filter(FileData.hash == '')
 		print("Hashes missing: {0}".format(missingHashes.count()))
+
 		fileIndex = 0
 		numFiles = missingHashes.count()
 		for fileData in missingHashes.all():
@@ -664,20 +698,20 @@ class DbProcessor:
 		dhashSize = 8
 		fileIndex = 0
 		numFiles = missingDHashes.count()
-		for fileData in missingDHashes.all():
-			fileIndex += 1
-			print("building hash {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
-
-			imgHash = getDHash(fileData.path, dhashSize)
-			newData = DHashData(
-				hash = fileData.hash,
-				size = fileData.size,
-				hashSize = dhashSize,
-				dhash = imgHash
-			)
-			print(newData)
-			self.session.add(newData)
-
+		with mp.Pool() as pool:
+			for curData in pool.imap(
+					makeDHashData, ((x, dhashSize) for x in missingDHashes.all())):
+				if not curData:
+					raise OperationInterruptedException()
+				fileIndex += 1
+				newData = curData[0]
+				path = curData[1]
+				if isinstance(newData, Exception):
+					print("exception: {0}, file: {1}".format(newData, path))
+					continue
+				print("building hash {1}/{2}for: {0} : {3}".format(path, fileIndex, numFiles, newData.dhash))
+				self.session.add(newData)
+			
 		print("commiting")
 		self.session.commit()
 
@@ -695,21 +729,27 @@ class DbProcessor:
 		numFiles = missingOcr.count()
 		print("missing translations: {0}".format(numFiles))
 		fileIndex = 0
-		useFullData = False
-		for fileData in missingOcr.all():
-			fileIndex += 1
-			print("building ocr {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
 
-			with Image.open(fileData.path) as img:
-				ocr = pytesseract.image_to_data(img, lang=ocrLang) if useFullData else pytesseract.image_to_string(img, lang=ocrLang) 
-				#print(ocr)
-				newData = OcrData(
-					size = fileData.size,
-					hash = fileData.hash,
-					lang = ocrLang,
-					text = ocr
-				)
-				print(newData)
+		useFullData = False
+		with mp.Pool() as pool:
+			# fileData = data[0]
+			# tessCmd = data[1]
+			# ocrLang = data[2]
+			# useFullData = data[3]
+			for data in pool.imap(makeOcrData, ((x, self.config.tesscmd, ocrLang, useFullData) for x in missingOcr.all())):
+				if not data:
+					raise OperationInterruptedException()
+				newData: OcrData = data[0]
+				filePath = data[1]
+
+				fileIndex += 1
+				print("building ocr {1}/{2}for: {0}".format(filePath, fileIndex, numFiles))
+				if isinstance(newData, Exception):
+					print("exception: {0}: {1}".format(newData, filePath))
+					continue
+
+				ocrText:str = str(newData.text).replace('\n', ' \\ ')
+				print(ocrText)
 				self.session.add(newData)
 				
 		print("commiting")
@@ -742,41 +782,26 @@ class DbProcessor:
 
 		numFiles = missingPal.count()
 		print("missing palettes: {0}".format(numFiles))
-		#numFiles = 0
 		with mp.Pool() as pool:
-			fileIndex = 0;
+			fileIndex = 0
 			for curData in pool.imap(makePaletteData, missingPal.all(), chunksize = 8):
 				if not curData:
-					raise OperationInterruptedException()
-				if isinstance(curData, Exception):
-					print("exception has occured: {0}".format(curData))
-					continue
-				if isinstance(curData, OSError):
-					print("os error: {0}".format(curData))
-					continue
+				 	raise OperationInterruptedException()
 				newData = curData[0]
-				fileData = curData[1]
+				filePath = curData[1]
+				err = curData[2]
+				if err and isinstance(err, KeyboardInterrupt):
+				 	raise OperationInterruptedException()
+				if err and isinstance(err, Exception):
+					print("exception: \"{0}\" in file: \"{1}\"".format(err, filePath))
+					continue
+				if isinstance(err, OSError):
+					print("os error: {0}".format(err))
+					continue
 				fileIndex += 1
-				print("building palette {1}/{2} ({3}) for: {0}".format(fileData.path, fileIndex, numFiles, newData.palette))
+				print("building palette {1}/{2} ({3}) for: {0}".format(filePath, fileIndex, numFiles, newData.palette))
 				#print(newData)
 				self.session.add(newData)
-
-		# numFiles = missingPal.count()
-		# fileIndex = 0;
-		# print("missing palettes: {0}".format(numFiles))
-		# for fileData in missingPal.all():
-		# 	fileIndex += 1
-		# 	print("building palette {1}/{2}for: {0}".format(fileData.path, fileIndex, numFiles))
-
-		# 	palString = getPaletteString(fileData.path)
-		# 	#print(palString)
-		# 	newData = PaletteData(
-		# 		size = fileData.size,
-		# 		hash = fileData.hash,
-		# 		palette = palString
-		# 	)
-		# 	print(newData)
-		# 	self.session.add(newData)
 
 		self.session.commit()
 		pass
@@ -924,6 +949,7 @@ def buildParser():
 	parse.add_argument("--hash", help="build file hashes", action="store_true")
 	parse.add_argument("--imghash", help="build image hashes", action="store_true")
 	parse.add_argument("--ocr", help="ocr images", action="store_true")
+	parse.add_argument("--lang", help="ocr language", action="store", default='eng')
 	parse.add_argument("--random", help="open random image", action="store_true")
 	parse.add_argument("--findmaincolor", help="list images with specified main colors. (ROYGBCMKLW)", action="store")
 	parse.add_argument("--findcolor", help="list images with specified colors (ROYGBCMKLW)", action="store")
@@ -953,7 +979,7 @@ def main():
 		if (args.imghash):
 			dbProc.buildDhashes()
 		if (args.ocr):
-			dbProc.buildOcr()
+			dbProc.buildOcr(args.lang)
 		if (args.pal):
 			dbProc.buildPalettes()
 	except KeyboardInterrupt:
