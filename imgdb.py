@@ -8,6 +8,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from pathlib import Path
 from datetime import datetime
 import hashlib
+import time
 
 from PIL import Image
 import dhash
@@ -549,27 +550,32 @@ def makeDHashData(data: tuple[FileData, int]) -> tuple[DHashData, str]:
 	except KeyboardInterrupt:
 		return None
 
-def makeOcrData(data: tuple[FileData, str, str, bool]) -> tuple[OcrData, str]:
+def makeOcrData(data: tuple[tuple[str, int, str], str, str, bool]) \
+		-> tuple[Optional[tuple[str, str]], tuple[str, int, str], Optional[Exception]]:
 	try:
 		fileData = data[0]
 		tessCmd = data[1]
 		ocrLang = data[2]
 		useFullData = data[3]
 
-		with Image.open(fileData.path) as img:
+		filePath = fileData[0]
+		fileSize = fileData[1]
+		fileHash = fileData[2]
+
+		with Image.open(filePath) as img:
 			pytesseract.pytesseract.tesseract_cmd = tessCmd
 			ocr = pytesseract.image_to_data(img, lang=ocrLang) if useFullData else pytesseract.image_to_string(img, lang=ocrLang) 
-			newData = OcrData(
-				size = fileData.size,
-				hash = fileData.hash,
-				lang = ocrLang,
-				text = ocr
-			)
-			return (newData, fileData.path)
+			# newData = OcrData(
+			# 	size = fileData.size,
+			# 	hash = fileData.hash,
+			# 	lang = ocrLang,
+			# 	text = ocr
+			# )
+			return ((ocr, ocrLang), fileData, None)
 	except KeyboardInterrupt:
 		return None
 	except Exception as e:
-		return (e, fileData.path)
+		return (None, fileData, e)
 
 def makePaletteData(fileData: FileData) \
 		-> tuple[Optional[PaletteData], str, Optional[Exception]]:
@@ -717,7 +723,33 @@ class DbProcessor:
 
 		pass
 
-	def buildOcr(self, ocrLang='eng'):
+	def killOcr(self, ocrLang='eng'):
+		print("deleting ocr for {0}".format(ocrLang))
+		self.session.query(OcrData).filter(OcrData.lang == ocrLang).delete()
+		self.session.commit()
+
+	def searchText(self, textPattern, ocrLang='eng', brief: bool = False):
+		textQuery = self.session.query(FileData.path, OcrData.text) \
+			.filter(OcrData.hash == FileData.hash) \
+			.filter(OcrData.lang == ocrLang) \
+			.filter(OcrData.text != "") \
+			.filter(OcrData.text.ilike(textPattern)) \
+			.order_by(FileData.path)
+			#.join(OcrData, OcrData.hash == FileData.hash)\
+
+		if not brief:
+			numResults = textQuery.count()
+			print("{0} result(s)".format(numResults))
+
+		for cur in textQuery.all():			
+			if brief:
+				print(cur[0])
+			else:
+				print("{0}:\n{1}\n".format(cur[0], str(cur[1]).replace('\n', '\\')))
+
+
+
+	def buildOcr(self, ocrLang='eng', mask=None):
 		pytesseract.pytesseract.tesseract_cmd = self.config.tesscmd
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
@@ -726,31 +758,51 @@ class DbProcessor:
 			(FileData.hash == OcrData.hash) & (OcrData.lang == ocrLang))
 		)
 		print(missingOcr)
+		if (mask):
+			missingOcr = missingOcr.filter(FileData.path.ilike(mask))
+			print(missingOcr)
 		numFiles = missingOcr.count()
 		print("missing translations: {0}".format(numFiles))
 		fileIndex = 0
 
 		useFullData = False
 		with mp.Pool() as pool:
-			# fileData = data[0]
-			# tessCmd = data[1]
-			# ocrLang = data[2]
-			# useFullData = data[3]
-			for data in pool.imap(makeOcrData, ((x, self.config.tesscmd, ocrLang, useFullData) for x in missingOcr.all())):
+			fileLimit = 1000
+			for data in pool.imap(makeOcrData, 
+					(
+						((x.path, x.size, x.hash), self.config.tesscmd, ocrLang, useFullData) for x in missingOcr.all()
+					)):
 				if not data:
 					raise OperationInterruptedException()
-				newData: OcrData = data[0]
-				filePath = data[1]
+
+				err = data[2]
+				ocrTuple = data[0]
+				fileData: tuple[str, int, str] = data[1]
+				filePath = fileData[0]
+				fileSize = fileData[1]
+				fileHash = fileData[2]
 
 				fileIndex += 1
 				print("building ocr {1}/{2}for: {0}".format(filePath, fileIndex, numFiles))
-				if isinstance(newData, Exception):
-					print("exception: {0}: {1}".format(newData, filePath))
+				if isinstance(err, Exception):
+					print("exception: {0}: {1}".format(err, filePath))
 					continue
 
-				ocrText:str = str(newData.text).replace('\n', ' \\ ')
-				print(ocrText)
+				ocrText = ocrTuple[0]
+				ocrLang = ocrTuple[1]
+
+				print(str(ocrText).replace('\n', ' \\ '))
+				newData = OcrData(
+					hash = fileHash,
+					size = fileSize,
+					lang = ocrLang,
+					text = ocrText
+				)
+				#print(newData)
 				self.session.add(newData)
+				# if (fileIndex % fileLimit) == 0:
+				# 	print("saving due to file limit: {0}".format(fileLimit))
+				# 	self.session.commit()
 				
 		print("commiting")
 		self.session.commit()
@@ -949,6 +1001,8 @@ def buildParser():
 	parse.add_argument("--hash", help="build file hashes", action="store_true")
 	parse.add_argument("--imghash", help="build image hashes", action="store_true")
 	parse.add_argument("--ocr", help="ocr images", action="store_true")
+	parse.add_argument("--killocr", help="kill ocr images", action="store_true")
+	parse.add_argument("--ocrmask", help="ocr file mask for ilike", action="store", default=None)
 	parse.add_argument("--lang", help="ocr language", action="store", default='eng')
 	parse.add_argument("--random", help="open random image", action="store_true")
 	parse.add_argument("--findmaincolor", help="list images with specified main colors. (ROYGBCMKLW)", action="store")
@@ -958,6 +1012,7 @@ def buildParser():
 	parse.add_argument("--brief", help="print less stuff", action="store_true")
 	parse.add_argument("--exportjson", help="export database to file", action="store")
 	parse.add_argument("--importjson", help="import database from file", action="store")
+	parse.add_argument("--searchtext", help="search text in db. Uses ilike pattern", action="store")
 	return parse
 
 def main():
@@ -974,12 +1029,14 @@ def main():
 			dbProc.scanFilesystem()
 		if (args.killpal):
 			dbProc.killPalettes()
+		if (args.killocr):
+			dbProc.killOcr(args.lang)
 		if (args.hash):
 			dbProc.buildHashes()
 		if (args.imghash):
 			dbProc.buildDhashes()
 		if (args.ocr):
-			dbProc.buildOcr(args.lang)
+			dbProc.buildOcr(args.lang, args.ocrmask)
 		if (args.pal):
 			dbProc.buildPalettes()
 	except KeyboardInterrupt:
@@ -1001,6 +1058,8 @@ def main():
 		dbProc.exportJson(args.exportjson)
 	if (args.importjson):
 		dbProc.importJson(args.importjson)
+	if (args.searchtext):
+		dbProc.searchText(args.searchtext, args.lang, args.brief)
 
 	if (args.random):
 		dbProc.openRandom()
