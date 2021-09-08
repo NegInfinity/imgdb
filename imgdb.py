@@ -982,6 +982,17 @@ class DbProcessor:
 			self.session.commit()
 			print('done')
 	
+	def findFiles(self, pattern: str, brief: bool = False):
+		files = self.session.query(FileData.path) \
+			.filter(FileData.path.ilike(pattern)) \
+			.order_by(FileData.path)
+
+		if not brief:
+			print("{0} results".format(files.count()))
+
+		for x in files.all():
+			print(x[0])
+
 	def killDupes(self):
 		print("cleaning duplicate palettes")
 		distinctPals = self.session.query(PaletteData.id) \
@@ -1062,6 +1073,7 @@ def buildParser():
 	parse.add_argument("--random", help="open random image", action="store_true")
 	parse.add_argument("--findmaincolor", help="list images with specified main colors. (ROYGBCMKLW)", action="store")
 	parse.add_argument("--findcolor", help="list images with specified colors (ROYGBCMKLW)", action="store")
+	parse.add_argument("--findfiles", help="list paths matchin pattern (ilike)", action="store")
 	parse.add_argument("--colorlike", help="color search using ilike syntax (ROYGBCMKLW)", action="store")
 	parse.add_argument("--listcolors", help="list image colors", action="store_true")
 	parse.add_argument("--brief", help="print less stuff", action="store_true")
@@ -1117,6 +1129,8 @@ def main():
 		dbProc.importJson(args.importjson)
 	if (args.searchtext):
 		dbProc.searchText(args.searchtext, args.lang, args.brief)
+	if (args.findfiles):
+		dbProc.findFiles(args.findfiles, args.brief)
 
 	if (args.random):
 		dbProc.openRandom()
