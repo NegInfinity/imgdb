@@ -696,10 +696,11 @@ class DbProcessor:
 
 	def buildDhashes(self):
 		print("building dhashes")
-		missingDHashes = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			# (FileData.hash == DHashData.hash) & (FileData.size == DHashData.size))
-			(FileData.hash == DHashData.hash))
-		)
+		missingDHashes = self.session.query(FileData) \
+			.filter(FileData.hash != DEFAULT_HASH) \
+			.filter(~ exists().where(FileData.hash == DHashData.hash)) \
+			.group_by(FileData.hash)
+
 		print("DHashes missing: {0}".format(missingDHashes.count()))
 		dhashSize = 8
 		fileIndex = 0
@@ -734,8 +735,8 @@ class DbProcessor:
 			.filter(OcrData.lang == ocrLang) \
 			.filter(OcrData.text != "") \
 			.filter(OcrData.text.ilike(textPattern)) \
+			.group_by(OcrData.hash) \
 			.order_by(FileData.path)
-			#.join(OcrData, OcrData.hash == FileData.hash)\
 
 		if not brief:
 			numResults = textQuery.count()
@@ -747,17 +748,16 @@ class DbProcessor:
 			else:
 				print("{0}:\n{1}\n".format(cur[0], str(cur[1]).replace('\n', '\\')))
 
-
-
 	def buildOcr(self, ocrLang='eng', mask=None):
 		pytesseract.pytesseract.tesseract_cmd = self.config.tesscmd
 
 		print("tess languages: {0}".format(pytesseract.get_languages()))
-		missingOcr = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(~ exists().where(
-			# (FileData.hash == OcrData.hash) & (FileData.size == OcrData.size) & (OcrData.lang == ocrLang))
-			(FileData.hash == OcrData.hash) & (OcrData.lang == ocrLang))
-		)
-		print(missingOcr)
+		missingOcr = self.session.query(FileData) \
+			.filter(FileData.hash != DEFAULT_HASH) \
+			.filter(~ exists().where((FileData.hash == OcrData.hash) & (OcrData.lang == ocrLang))) \
+			.group_by(FileData.hash)
+
+		#print(missingOcr)
 		if (mask):
 			missingOcr = missingOcr.filter(FileData.path.ilike(mask))
 			print(missingOcr)
@@ -817,19 +817,11 @@ class DbProcessor:
 		pass
 
 	def buildPalettes(self):
-		missingPal = self.session.query(FileData).filter(FileData.hash != DEFAULT_HASH).filter(
-			~ exists().where(
-				# (FileData.hash == PaletteData.hash) & (FileData.size == PaletteData.size)
-				(FileData.hash == PaletteData.hash)
-			)
-		)
-		# missingPal = self.session.query(FileData).filter(
-		# 	FileData.hash != DEFAULT_HASH
-		# ).filter(
-		# 	~tuple_(FileData.hash, FileData.size).in_(
-		# 		self.session.query(PaletteData.hash, PaletteData.size)
-		# 	)
-		# )
+		missingPal = self.session.query(FileData) \
+			.filter(FileData.hash != DEFAULT_HASH) \
+			.filter(~ exists().where(FileData.hash == PaletteData.hash)) \
+			.group_by(FileData.hash)
+
 		print(missingPal)
 
 		numFiles = missingPal.count()
@@ -989,6 +981,68 @@ class DbProcessor:
 			print('comitting')
 			self.session.commit()
 			print('done')
+	
+	def killDupes(self):
+		print("cleaning duplicate palettes")
+		distinctPals = self.session.query(PaletteData.id) \
+			.group_by(PaletteData.hash)
+		killPals = self.session.query(PaletteData) \
+			.filter(~PaletteData.id.in_(distinctPals))
+
+		numToKill = killPals.count()
+		if (numToKill):
+			print("deleting {0} duplicate palettes".format(numToKill))
+
+			for x in killPals.all():
+				self.session.delete(x)
+		else:
+			print("no duplicate palettes")
+
+		print("cleaning duplicate image hashes")
+		distinctImHashes = self.session.query(DHashData.id) \
+			.group_by(DHashData.hash)
+		killImHashes = self.session.query(DHashData) \
+			.filter(~DHashData.id.in_(distinctImHashes))
+
+		numToKill = killImHashes.count()
+		if (numToKill):
+			print("deleting {0} duplicate imHashes".format(numToKill))
+
+			for x in killImHashes.all():
+				self.session.delete(x)
+				pass
+		else:
+			print("no duplicate image hashes")
+
+		print("cleaning ocr")
+		langList = self.session.query(OcrData.lang) \
+			.group_by(OcrData.lang)
+		langs = langList.all()
+		print("languages: {0}".format(langs))
+		for x in langs:
+			lang = x[0]
+			print("Cleaning: {0}".format(lang))
+			distinctOcr = self.session.query(OcrData.id) \
+				.filter(OcrData.lang == lang) \
+				.group_by(OcrData.hash)
+			distinctCount = distinctOcr.count()
+			killOcr = self.session.query(OcrData) \
+				.filter(OcrData.lang == lang) \
+				.filter(~OcrData.id.in_(distinctOcr))
+			killCount = killOcr.count()
+			print("Disctinct: {0}; kill: {1}".format(distinctCount, killCount))
+			if killCount > 0:
+				print("Cleaning {0} duplicates".format(killCount))
+				for x in killOcr.all():
+					self.session.delete(x)
+			else:
+				print("No duplicates to kill")
+
+		print("comitting")
+		self.session.commit()
+		print("done")
+
+		pass
 
 	def commitSession(self):
 		self.session.commit()
@@ -998,6 +1052,7 @@ def buildParser():
 	parse.add_argument("--scan", help="scan filesystem", action="store_true")
 	parse.add_argument("--pal", help="build palettes", action="store_true")
 	parse.add_argument("--killpal", help="kill palettes", action="store_true")
+	parse.add_argument("--killdupes", help="kill duplicate entries", action="store_true")
 	parse.add_argument("--hash", help="build file hashes", action="store_true")
 	parse.add_argument("--imghash", help="build image hashes", action="store_true")
 	parse.add_argument("--ocr", help="ocr images", action="store_true")
@@ -1039,6 +1094,8 @@ def main():
 			dbProc.buildOcr(args.lang, args.ocrmask)
 		if (args.pal):
 			dbProc.buildPalettes()
+		if (args.killdupes):
+			dbProc.killDupes()
 	except KeyboardInterrupt:
 		print("keyboard interrupt on lengthy operation. Saving to db.")
 		dbProc.commitSession()		
